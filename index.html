@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Jarvis Spatial AR - Glitch Free Engine</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      width:100vw; height:100vh; overflow:hidden;
+      background:#000;
+      font-family:'Courier New', monospace;
+    }
+    #container { position:relative; width:100%; height:100%; }
+
+    #webcam {
+      position:absolute; inset:0;
+      width:100%; height:100%;
+      object-fit:cover;
+      transform:scaleX(-1);
+      z-index:1;
+    }
+    #canvas3d {
+      position:absolute; top:0; left:0;
+      width:100%; height:100%;
+      z-index:2; pointer-events:none;
+    }
+
+    /* HUD — Jarvis aesthetic */
+    #hud {
+      position:absolute;
+      top:max(16px, env(safe-area-inset-top, 16px));
+      left:16px;
+      z-index:3; pointer-events:none;
+      color:#00ffff;
+      font-size:clamp(10px,2.2vw,14px);
+      line-height:1.9;
+      letter-spacing:0.15em;
+      background:rgba(0,15,30,0.6);
+      padding:12px 18px;
+      border-left:3px solid #00ffff;
+      box-shadow: 0 0 15px rgba(0, 255, 255, 0.2);
+      text-shadow:0 0 7px rgba(0,255,255,0.8);
+    }
+    .hl { color:rgba(0,255,255,0.5); }
+
+    /* Mode tag */
+    #tag {
+      position:absolute;
+      bottom:max(30px, env(safe-area-inset-bottom, 30px));
+      left:50%; transform:translateX(-50%);
+      z-index:3; pointer-events:none;
+      color:#00ffff;
+      font-size:clamp(10px,2vw,12px);
+      letter-spacing:0.35em;
+      background:rgba(0,15,30,0.7);
+      padding:8px 20px;
+      border:1px solid rgba(0,255,255,0.4);
+      box-shadow: 0 0 20px rgba(0,255,255,0.3);
+      text-shadow:0 0 8px rgba(0,255,255,0.9);
+      white-space:nowrap;
+    }
+
+    /* Loading */
+    #loading {
+      position:absolute; inset:0; z-index:10;
+      background:#000;
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center; gap:18px;
+      color:#00ffff;
+      font-size:clamp(12px,3vw,16px);
+      letter-spacing:0.25em;
+      text-shadow:0 0 12px #00ffff;
+      text-align:center; padding:24px;
+    }
+    .bar-wrap { width:min(260px,68vw); height:3px; background:rgba(0,255,255,0.15); overflow:hidden; }
+    .bar { height:100%; background:linear-gradient(90deg,transparent,#00ffff,transparent); animation:sw 1.2s linear infinite; }
+    @keyframes sw { from{transform:translateX(-100%)} to{transform:translateX(300%)} }
+  </style>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="container">
+  <div id="loading">
+    <div>SYSTEM BOOT</div>
+    <div class="bar-wrap"><div class="bar"></div></div>
+    <div style="font-size:0.6em;opacity:0.6;letter-spacing:0.2em">CALIBRATING GESTURE DISCRIMINATION MATRICES</div>
+  </div>
+
+  <div id="hud">
+    <span class="hl">SYS&nbsp;&nbsp;&nbsp;</span><span id="h-mode">STANDBY</span><br>
+    <span class="hl">SCALE&nbsp;</span><span id="h-scale">1.00</span>
+  </div>
+
+  <div id="tag">AWAITING INPUT</div>
+
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="canvas3d"></canvas>
+</div>
+
+<script>
+// ── DOM ──────────────────────────────────────────────────────────────────────
+const videoEl   = document.getElementById('webcam');
+const canvasEl  = document.getElementById('canvas3d');
+const loadingEl = document.getElementById('loading');
+const hMode     = document.getElementById('h-mode');
+const hScale    = document.getElementById('h-scale');
+const tag       = document.getElementById('tag');
+
+let W = window.innerWidth;
+let H = window.innerHeight;
+
+// ── RENDERER ─────────────────────────────────────────────────────────────────
+const scene    = new THREE.Scene();
+const camera3d = new THREE.PerspectiveCamera(60, W / H, 0.1, 1000);
+camera3d.position.z = 5;
+
+const renderer = new THREE.WebGLRenderer({ canvas: canvasEl, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+
+window.addEventListener('resize', () => {
+  W = window.innerWidth; H = window.innerHeight;
+  camera3d.aspect = W / H;
+  camera3d.updateProjectionMatrix();
+  renderer.setSize(W, H);
+});
+
+// ── LIGHTS ───────────────────────────────────────────────────────────────────
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+keyLight.position.set(3, 5, 4);
+scene.add(keyLight);
+
+const rimLight = new THREE.DirectionalLight(0x00ffff, 2.0);
+rimLight.position.set(0, 2, -5);
+scene.add(rimLight);
+
+scene.add(new THREE.AmbientLight(0x002244, 2.0));
+
+// ── CUBE (Jarvis Translucent Mesh) ───────────────────────────────────────────
+const shapeGroup = new THREE.Group();
+shapeGroup.visible = false;
+scene.add(shapeGroup);
+
+const cubeGeo = new THREE.BoxGeometry(1, 1, 1);
+
+const cubeMat = new THREE.MeshPhysicalMaterial({
+  color: 0x00aaff,
+  emissive: 0x004488,
+  emissiveIntensity: 0.6,
+  transparent: true,
+  opacity: 0.35,
+  roughness: 0.1,
+  metalness: 0.5,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false
+});
+const cubeMesh = new THREE.Mesh(cubeGeo, cubeMat);
+shapeGroup.add(cubeMesh);
+
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending });
+shapeGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(cubeGeo), edgeMat));
+
+const bracketMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
+const bracketGeo = new THREE.BoxGeometry(1.05, 1.05, 1.05);
+shapeGroup.add(new THREE.LineSegments(new THREE.EdgesGeometry(bracketGeo), bracketMat));
+
+// ── DATA INTERACTION LINK (The Reactive Depth Beam) ──────────────────────────
+const beamGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const beamMat = new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0, linewidth: 2, blending: THREE.AdditiveBlending });
+const beamLine = new THREE.Line(beamGeo, beamMat);
+scene.add(beamLine);
+
+// ── MATHS & ADVANCED FILTERING ───────────────────────────────────────────────
+function mpToWorld(lm) {
+  return {
+    x: (1 - lm.x * 2) * (W / H) * 2.2,
+    y: (1 - lm.y * 2) * 2.2,
+  };
+}
+
+function pinchDist(lms) {
+  const a = lms[4], b = lms[8];
+  return Math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2 + (a.z-b.z)**2);
+}
+
+function isOpenPalm(lms) {
+  return lms[8].y < lms[6].y && lms[12].y < lms[10].y && lms[16].y < lms[14].y && lms[20].y < lms[18].y;
+}
+
+// Highly accurate, multi-point isolation for pointing commands
+function isPointing(lms) {
+  const indexUp    = lms[8].y < lms[6].y;
+  const middleDown = lms[12].y > lms[10].y;
+  const ringDown   = lms[16].y > lms[14].y;
+  const pinkyDown  = lms[20].y > lms[18].y;
+  
+  // Anti-Collision heuristic: In a true point, the thumb tip (4) is close to the index base (5).
+  // During a wide stretch-pinch, the thumb extends outward, throwing this value off.
+  const thumbDistToMCP = Math.sqrt((lms[4].x - lms[5].x)**2 + (lms[4].y - lms[5].y)**2);
+  const thumbTucked = thumbDistToMCP < 0.09;
+
+  return indexUp && middleDown && ringDown && pinkyDown && thumbTucked;
+}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function velocityFilter(current, target, baseAlpha) {
+  const delta = target - current;
+  const distance = Math.abs(delta);
+  let velocityFactor = distance * 2.5;
+  if (distance < 0.008) velocityFactor = 0.02; 
+  const finalAlpha = clamp(baseAlpha + velocityFactor, 0.04, 0.88);
+  return current + delta * finalAlpha;
+}
+
+// ── ANIMATION STATE ──────────────────────────────────────────────────────────
+let posX = 0, posY = 0;    
+let tgtX = 0, tgtY = 0;
+
+let rotX = 0, rotY = 0;
+let spinRateX = 0.005, spinRateY = 0.012;   
+let tgtSpinX  = 0.005, tgtSpinY  = 0.012;  
+
+let uniScale = 1,  tgtUni = 1;
+let sclX = 1,      tgtSclX = 1;
+let sclY = 1,      tgtSclY = 1;
+let sclZ = 1,      tgtSclZ = 1; 
+
+let dropFrames = 0;
+const GRACE = 12; 
+
+let mode = 'STANDBY';
+let tick = 0;
+let latestData = null;  
+
+// State Locks for Flawless One-Hand Matrix Operations
+let pointingFrameCounter = 0;
+let pinchActiveLatch = false; 
+
+// ── RAF LOOP ─────────────────────────────────────────────────────────────────
+function rafLoop() {
+  requestAnimationFrame(rafLoop);
+  tick += 0.018;
+
+  if (latestData) {
+    applyTracking(latestData);
+  }
+
+  renderer.render(scene, camera3d);
+}
+rafLoop();
+
+function applyTracking(d) {
+  posX = velocityFilter(posX, tgtX, 0.12);
+  posY = velocityFilter(posY, tgtY, 0.12);
+  shapeGroup.position.set(posX, posY, 0);
+
+  spinRateX = velocityFilter(spinRateX, tgtSpinX, 0.08);
+  spinRateY = velocityFilter(spinRateY, tgtSpinY, 0.08);
+  rotX += spinRateX;
+  rotY += spinRateY;
+  shapeGroup.rotation.set(rotX, rotY, 0);
+
+  uniScale  = velocityFilter(uniScale,  tgtUni,  0.12);
+  sclX      = velocityFilter(sclX,      tgtSclX, 0.12);
+  sclY      = velocityFilter(sclY,      tgtSclY, 0.12);
+  sclZ      = velocityFilter(sclZ,      tgtSclZ, 0.12);
+
+  shapeGroup.scale.set(uniScale * sclX, uniScale * sclY, uniScale * sclZ);
+
+  if (tick % 0.09 < 0.018) {
+    hMode.textContent  = mode;
+    hScale.textContent = uniScale.toFixed(2);
+  }
+}
+
+// ── MEDIAPIPE CORE PROCESSING ────────────────────────────────────────────────
+function onHandResults(results) {
+  let lmArr = results.multiHandLandmarks || [];
+  const n     = lmArr.length;
+
+  if (n === 0) {
+    dropFrames++;
+    if (dropFrames > GRACE) {
+      shapeGroup.visible = false;
+      beamMat.opacity = 0;
+      mode = 'STANDBY';
+      tag.textContent = 'AWAITING INPUT';
+      tgtSclX = 1; tgtSclY = 1; tgtSclZ = 1;
+      tgtSpinX = 0.005; tgtSpinY = 0.012;
+      pointingFrameCounter = 0;
+      pinchActiveLatch = false;
+    }
+    latestData = {}; 
+    return;
+  }
+
+  dropFrames = 0;
+  shapeGroup.visible = true;
+
+  if (n === 2) {
+    pinchActiveLatch = false; // Override single hand latch systems completely
+    if (lmArr[0][0].x > lmArr[1][0].x) {
+      lmArr = [lmArr[1], lmArr[0]];
+    }
+  }
+
+  const domLms = lmArr[0]; 
+  const offLms = n === 2 ? lmArr[1] : null;
+
+  // ────────────────────────────────────────────────────────────────────────
+  // TWO-HAND ENGINE (Depth Plane Separation Architecture)
+  // ────────────────────────────────────────────────────────────────────────
+  if (offLms) {
+    pointingFrameCounter = 0; 
+    beamMat.opacity = 0.6;
+    const domOpen = isOpenPalm(domLms);
+    const offOpen = isOpenPalm(offLms);
+
+    const dp = mpToWorld(domLms[8]); 
+    const op = mpToWorld(offLms[8]); 
+
+    tgtX = (dp.x + op.x) * 0.5;
+    tgtY = ((dp.y + op.y) * 0.5) + 1.1; 
+
+    const bp = beamGeo.attributes.position;
+    bp.setXYZ(0, dp.x, dp.y, 0);
+    bp.setXYZ(1, op.x, op.y, 0);
+    bp.needsUpdate = true;
+
+    const sizeDom = Math.sqrt((domLms[0].x - domLms[9].x)**2 + (domLms[0].y - domLms[9].y)**2);
+    const sizeOff = Math.sqrt((offLms[0].x - offLms[9].x)**2 + (offLms[0].y - offLms[9].y)**2);
+    const avgSize = (sizeDom + sizeOff) * 0.5;
+    
+    const normDepthDelta = Math.abs(sizeDom - sizeOff) / avgSize;
+    const dist2D = Math.sqrt((dp.x - op.x)**2 + (dp.y - op.y)**2);
+    const DEPTH_THRESHOLD = 0.09; 
+
+    if (domOpen && offOpen) {
+      tgtSpinX = 0; tgtSpinY = 0;
+    } else {
+      tgtSpinY = 0.08; tgtSpinX = 0.03;
+    }
+
+    if (normDepthDelta > DEPTH_THRESHOLD) {
+      tgtSclZ = clamp(1.0 + (normDepthDelta - DEPTH_THRESHOLD) * 4.5, 0.3, 3.5);
+      tgtUni = clamp(0.4 + dist2D * 1.5, 0.25, 4.0);
+
+      if (domOpen && offOpen) {
+        mode = 'STABILIZED WARP'; tag.textContent = 'STABILIZED DEPTH SCALING';
+      } else {
+        mode = 'JARVIS PUSH/PULL'; tag.textContent = 'Z-DEPTH STRETCH';
+      }
+      beamMat.color.setHex(0xffaa00);
+      beamMat.opacity = 0.5 + Math.sin(tick * 15) * 0.25; 
+    } else {
+      tgtSclZ = 1.0; 
+      tgtUni = clamp(0.4 + dist2D * 1.5, 0.25, 4.0);
+
+      if (domOpen && offOpen) {
+        mode = 'STABILIZED SCALE'; tag.textContent = 'STABILIZED UNIFORM SCALING';
+      } else {
+        mode = 'COPLANAR SCALE'; tag.textContent = 'UNIFORM BIG SCALE';
+      }
+      beamMat.color.setHex(0x00ffff);
+      beamMat.opacity = 0.6;
+    }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // ONE HAND ENGINE (With Anti-Glitch Gesture Latching)
+  // ────────────────────────────────────────────────────────────────────────
+  } else {
+    beamMat.opacity = 0;
+    tgtSclX = 1.0; tgtSclY = 1.0; tgtSclZ = 1.0;
+
+    const pd = pinchDist(domLms);
+    
+    // Lock logic: Engagement threshold locks interaction to scale adjustments
+    if (pd < 0.07) {
+      pinchActiveLatch = true;
+    }
+    // Lock release: Flash a flat open palm to clear single hand interaction modes
+    if (isOpenPalm(domLms)) {
+      pinchActiveLatch = false;
+    }
+
+    // Evaluate spin metrics ONLY if the scale lock system is currently clear
+    if (!pinchActiveLatch && isPointing(domLms)) {
+      pointingFrameCounter = Math.min(pointingFrameCounter + 1, 15);
+    } else {
+      pointingFrameCounter = Math.max(pointingFrameCounter - 1, 0);
+    }
+
+    let resolvesAsSpin = false;
+    if (pointingFrameCounter >= 8) {
+      resolvesAsSpin = true;
+    } else if (pointingFrameCounter > 0 && (mode === 'SPIN PROFILE' || mode === 'SPIN CONTROLLER')) {
+      resolvesAsSpin = true;
+    }
+
+    if (resolvesAsSpin) {
+      // ── ONE HANDED SPIN MODE ──
+      tgtSpinY = 0.16;
+      tgtSpinX = 0.04;
+      mode = 'SPIN PROFILE';
+      tag.textContent = 'SPIN CONTROLLER';
+
+      const iw = mpToWorld(domLms[8]);
+      tgtX = iw.x; tgtY = iw.y + 0.7; 
+
+    } else {
+      // ── ONE HANDED PINCH SCALE MODE (Glitch Locked) ──
+      const t = clamp((pd - 0.02) / 0.36, 0, 1);
+      tgtUni   = 0.18 + t * t * (3 - 2 * t) * 2.32;
+
+      tgtSpinY = 0.012;
+      tgtSpinX = 0.005;
+      mode = 'SYSTEM CALIBRATION';
+      tag.textContent = 'CALIBRATING';
+
+      const mw = mpToWorld({ x: (domLms[4].x + domLms[8].x) * 0.5, y: (domLms[4].y + domLms[8].y) * 0.5 });
+      tgtX = mw.x;
+      tgtY = mw.y;
+    }
+  }
+
+  latestData = { n };
+}
+
+// ── MEDIAPIPE INITIALIZATION ─────────────────────────────────────────────────
+function initMediaPipe() {
+  const hands = new Hands({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+  });
+  
+  hands.setOptions({
+    maxNumHands:           2,
+    modelComplexity:       0,   
+    minDetectionConfidence:0.52, 
+    minTrackingConfidence: 0.52,
+  });
+  hands.onResults(onHandResults);
+
+  const cam = new Camera(videoEl, {
+    onFrame: async () => { await hands.send({ image: videoEl }); },
+    width:  640,
+    height: 480,
+  });
+  cam.start().then(() => { loadingEl.style.display = 'none'; });
+}
+
+initMediaPipe();
+</script>
+</body>
+</html>
